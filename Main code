@@ -1,0 +1,232 @@
+#include <Wire.h>
+#include "FS.h"
+#include "SD.h"
+#include <SPI.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+
+const char* ssid = "Tarun";
+const char* password = "12345678";
+
+WebServer server(80);
+WebSocketsServer webSocket = WebSocketsServer(81);
+
+// Sensor variables
+float rx, ry, rz;
+float AccX, AccY, AccZ;
+float x, y, z;
+
+// Timer variables
+unsigned long previousMillis = 0;
+const long interval = 10; // Data logging interval in milliseconds
+
+int minVal=265;
+int maxVal=402;
+
+File dataFile;
+#include "webpage2.h"
+
+float AccZ1=0;
+float AccZn1=0;
+float filterx1=0;
+float filterxn=0;
+float squrtn1=0;
+float squrt1=0;
+
+void handleRoot() {;
+  server.send(200, "text/html", webpageCont);
+}
+
+void setup() {
+  // Initialize Serial and SD card
+  Serial.begin(115200);
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  WiFi.mode(WIFI_STA);
+  Serial.print(" Local IP: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", handleRoot);
+  server.begin();
+  webSocket.begin();
+
+  if (!initSDCard()) {
+    Serial.println("SD card initialization failed");
+    while(1);
+  }
+
+  Wire.setClock(400000);
+  Wire.begin();
+  delay(250);
+
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6B);
+  Wire.write(0x00);
+  Wire.endTransmission();
+
+  SD.remove("/dataknee.csv");
+
+  // Open the data file for writing or create it if it doesn't exist
+  dataFile = SD.open("/dataknee.csv", FILE_APPEND);
+  if (!dataFile) {
+    Serial.println("Failed to open file for writing");
+    return;
+  }
+  // Write header to the data file
+  dataFile.println("Time, Forward ACC, Forward angles, sqrt ACC");
+  dataFile.close();
+}
+
+void loop() {
+
+  webSocket.loop();
+  server.handleClient();
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    // Read sensor data
+    importantMain();
+
+    // Calculate sqrt(ACCX^2 + ACCY^2 + ACCZ^2)
+    float squrt = sqrt(pow(AccX, 2) + pow(AccY, 2) + pow(AccZ, 2));
+
+    float AccZn = 0.72848*AccZn1 + 0.135755*AccZ + 0.135755*AccZ1;
+    float xn = 0.72848*filterxn + 0.135755*x + 0.135755*filterx1;
+    float squrtn = 0.72848*squrtn1 + 0.135755*squrt + 0.135755*squrt1;
+    delay(1);
+    AccZ1=AccZ;
+    AccZn1=AccZn;
+    filterx1=x;
+    filterxn=xn;
+    squrt1=squrt;
+    squrtn1=squrtn;
+
+
+    // Open the data file for appending
+    dataFile = SD.open("/dataknee.csv", FILE_APPEND);
+    if (dataFile) {
+      // Print data to the file
+      dataFile.print(currentMillis);
+      dataFile.print(", ");
+      dataFile.print(AccZn);
+      dataFile.print(", ");
+      dataFile.print(xn);
+      dataFile.print(", ");
+      dataFile.print(squrtn);
+      dataFile.println();
+      dataFile.close();
+    } else {
+      Serial.println("Failed to open file for appending");
+    }
+
+    String JSONtxt = String(currentMillis) + "," + String(AccZn) + "," + String(xn) + "," + String(squrtn);
+    webSocket.broadcastTXT(JSONtxt);
+
+    /* Print data to the Serial Monitor for debugging
+    Serial.print(currentMillis);
+    Serial.print(", ");
+    Serial.print(AccZ);
+    Serial.print(", ");
+    Serial.print(AccZn);
+    Serial.print(", ");
+    Serial.print(x);
+    Serial.print(", ");
+    Serial.print(xn);
+    Serial.print(", ");
+    Serial.print(squrt);
+    Serial.print(", ");
+    Serial.print(squrtn);
+    
+    Serial.println(); */
+  }
+}
+
+bool initSDCard() {
+  if (!SD.begin()) {
+    Serial.println("Card Mount Failed");
+    return false;
+  }
+
+  uint8_t cardType = SD.cardType();
+  if (cardType == CARD_NONE) {
+    Serial.println("No SD card attached");
+    return false;
+  }
+
+  Serial.print("SD Card Type: ");
+  if (cardType == CARD_MMC) {
+    Serial.println("MMC");
+  } else if (cardType == CARD_SD) {
+    Serial.println("SDSC");
+  } else if (cardType == CARD_SDHC) {
+    Serial.println("SDHC");
+  } else {
+    Serial.println("UNKNOWN");
+  }
+
+  return true;
+}
+
+void importantMain(void){
+
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1A);
+  Wire.write(0x05);
+  Wire.endTransmission();
+
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1C);
+  Wire.write(0x10);
+  Wire.endTransmission();
+
+  Wire.beginTransmission(0x68);
+  Wire.write(0x3B);
+  Wire.endTransmission();
+  Wire.requestFrom(0x68,6);
+  int16_t AccXLSB = Wire.read() << 8 | Wire.read();
+  int16_t AccYLSB = Wire.read() << 8 | Wire.read();
+  int16_t AccZLSB = Wire.read() << 8 | Wire.read();
+
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1B);
+  Wire.write(0x8);
+  Wire.endTransmission();
+  Wire.beginTransmission(0x68);
+  Wire.write(0X43);
+  Wire.endTransmission();
+
+  Wire.requestFrom(0x68,6);
+  int16_t GyroX = Wire.read() << 8 | Wire.read();
+  int16_t GyroY = Wire.read() << 8 | Wire.read();
+  int16_t GyroZ = Wire.read() << 8 | Wire.read(); 
+  rx=(float)GyroX/65.5;
+  ry=(float)GyroY/65.5;
+  rz=(float)GyroZ/65.5;
+
+  AccX=-(float)AccXLSB/4096-0.99;
+  AccY=(float)AccYLSB/4096+0.025;
+  AccZ=(float)AccZLSB/4096-0.05;
+
+  
+
+  /*AccX=AccX*10;
+  AccY=AccY*10;
+  AccZ=AccZ*10;*/
+
+  int xAng = map(AccXLSB,minVal,maxVal,-90,90);
+  int yAng = map(AccYLSB,minVal,maxVal,-90,90);
+  int zAng = map(AccZLSB,minVal,maxVal,-90,90);
+
+  x= (RAD_TO_DEG * (atan2(-yAng, -zAng)+PI));
+  y= 270-(RAD_TO_DEG * (atan2(-xAng, -zAng)+PI));
+  z= RAD_TO_DEG * (atan2(-yAng, -xAng)+PI);
+ 
+}
